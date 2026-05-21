@@ -1,28 +1,30 @@
 # 今天吃什么 / What Should We Eat Today
 
-一个部署到 Cloudflare Pages 的轻量网页：用户授权定位后，后端通过高德 Web 服务 API 查询附近真实餐饮店，再帮你随机推荐“今天吃什么”。
+一个部署到 Cloudflare Pages 的“今天吃什么”网页。它可以基于当前位置查询附近真实餐饮店，也可以把附近店铺保存到自定义分组中，之后从自己的清单里抽取。
 
-This is a lightweight Cloudflare Pages app. After the user grants location permission, a Pages Function calls Amap Web Service APIs to find real nearby restaurants and randomly recommends one place to eat today.
+A Cloudflare Pages app that helps answer “what should we eat today”. It can recommend real nearby restaurants via Amap Web Service APIs, or draw from custom restaurant groups saved in the browser.
 
 ## 功能特性
 
-- 一键获取当前位置附近的餐饮店。
-- 默认搜索半径为 `1.5km`。
-- 使用高德坐标转换接口，减少浏览器定位坐标与高德 POI 坐标之间的偏移。
-- 使用高德 POI 周边搜索接口，按餐饮类型 `050000` 查询真实店铺。
-- 高德 API key 只保存在 Cloudflare Pages 环境变量中，不会写入前端代码。
-- 支持“再摇一次”，在同一批附近店铺里重新推荐。
-- 对定位拒绝、接口未部署、空结果、后端错误都有友好提示。
+- `随机抽取`：获取当前位置附近真实餐饮店并随机推荐。
+- `自选抽取`：从附近店铺列表勾选保存到自定义分组，再从分组里抽取。
+- 支持多个本地分组，例如 `清淡组`、`食肉组`，数据保存在当前浏览器 `localStorage`。
+- 默认半径可选：`0.5km`、`1km`、`1.5km`、`3km`、`5km`。
+- 后端自动分页拉取高德 POI，突破单页 `25` 条限制，并按 POI id 去重。
+- 主按钮合并：首次为“今天吃什么 / 抽一个”，抽出结果后变为“再摇一次”。
+- 原创饭碗签筒 LOGO 和 favicon。
+- 高德 API key 只保存在 Cloudflare Pages 环境变量或本地 `.dev.vars`，不会进入前端代码。
 
 ## Features
 
-- Finds nearby restaurants from the user's current location.
-- Uses a default search radius of `1.5km`.
-- Converts browser GPS coordinates to Amap coordinates before POI search.
-- Uses Amap POI around search with food category `050000`.
-- Keeps the Amap API key on the Cloudflare backend only.
-- Supports rerolling another recommendation from the same nearby shop list.
-- Handles denied location permission, missing API responses, empty results, and backend errors.
+- `Random Draw`: find real nearby restaurants and recommend one.
+- `Custom Draw`: select nearby shops, save them into local groups, and draw from those groups.
+- Multiple browser-local groups, such as `清淡组` and `食肉组`, stored in `localStorage`.
+- Radius presets: `0.5km`, `1km`, `1.5km`, `3km`, `5km`.
+- Backend pagination for Amap POI search, so results are no longer capped at the first `25` shops.
+- One primary draw button: first draw, then reroll from the current pool.
+- Original bowl-and-lottery-stick logo and favicon.
+- The Amap API key stays on the backend only.
 
 ## 技术栈 / Tech Stack
 
@@ -39,10 +41,13 @@ This is a lightweight Cloudflare Pages app. After the user grants location permi
 ```txt
 .
 ├── functions/api/nearby-food.ts      # Cloudflare Pages Function，代理高德 API
-├── src/App.tsx                       # 页面主流程和交互状态
-├── src/lib/recommend.ts              # 店铺过滤、去重、随机推荐
+├── src/App.tsx                       # 页面主流程、模式切换、抽取交互
+├── src/components/Logo.tsx           # 原创 SVG LOGO
+├── src/lib/customGroups.ts           # 自选分组与 localStorage 读写
+├── src/lib/recommend.ts              # 店铺去重、筛选、随机推荐
 ├── src/types.ts                      # 前后端共享类型
 ├── src/styles.css                    # 页面样式
+├── public/favicon.svg                # favicon
 ├── .dev.vars.example                 # 本地环境变量示例
 └── README.md
 ```
@@ -55,19 +60,7 @@ This is a lightweight Cloudflare Pages app. After the user grants location permi
 npm install
 ```
 
-只开发前端页面：
-
-```bash
-npm run dev
-```
-
-默认地址是：
-
-```txt
-http://localhost:5173
-```
-
-如果要本地完整测试 Cloudflare Pages Function，请先创建 `.dev.vars`：
+本地完整调试 Cloudflare Pages Functions，请创建 `.dev.vars`：
 
 ```txt
 AMAP_WEB_SERVICE_KEY=你的高德Web服务Key
@@ -79,7 +72,13 @@ AMAP_WEB_SERVICE_KEY=你的高德Web服务Key
 npm run pages:dev
 ```
 
-注意：`npm run dev` 只启动 Vite 前端，不会启动 `/api/nearby-food`。如果只用 `npm run dev` 点击按钮，接口可能返回空内容或 404。本地完整测试推荐使用 `npm run pages:dev`。
+打开：
+
+```txt
+http://127.0.0.1:8788
+```
+
+注意：`npm run dev` 只启动 Vite 前端，不会启动 `/api/nearby-food`。需要测试真实附近店铺时请使用 `npm run pages:dev`。
 
 Install dependencies:
 
@@ -87,13 +86,7 @@ Install dependencies:
 npm install
 ```
 
-Frontend-only development:
-
-```bash
-npm run dev
-```
-
-To test Cloudflare Pages Functions locally, create `.dev.vars` first:
+For full local testing with Pages Functions, create `.dev.vars`:
 
 ```txt
 AMAP_WEB_SERVICE_KEY=your-amap-web-service-key
@@ -105,6 +98,12 @@ Then run:
 npm run pages:dev
 ```
 
+Open:
+
+```txt
+http://127.0.0.1:8788
+```
+
 ## Cloudflare Pages 部署 / Deployment
 
 在 Cloudflare Pages 创建项目，并配置：
@@ -114,7 +113,7 @@ Build command: npm run build
 Output directory: dist
 ```
 
-在 Cloudflare Pages 的环境变量中添加：
+在 Cloudflare Pages 的 Production 环境变量中添加：
 
 ```txt
 AMAP_WEB_SERVICE_KEY=你的高德Web服务Key
@@ -132,20 +131,13 @@ Build command: npm run build
 Output directory: dist
 ```
 
-Add this environment variable in Cloudflare Pages:
+Add this production environment variable:
 
 ```txt
 AMAP_WEB_SERVICE_KEY=your-amap-web-service-key
 ```
 
-Custom domain options:
-
-- Use the root domain if this is the only website on that domain.
-- Use a subdomain such as `eat.example.com` if the root domain is already used by another site.
-
 ## 后端接口 / Backend API
-
-前端请求自己的后端接口：
 
 ```txt
 POST /api/nearby-food
@@ -176,17 +168,19 @@ POST /api/nearby-food
       "rating": "4.7",
       "cost": "28.00"
     }
-  ]
+  ],
+  "meta": {
+    "fetchedPages": 8,
+    "reachedProviderLimit": true
+  }
 }
 ```
 
-The frontend calls its own backend endpoint:
+说明：
 
-```txt
-POST /api/nearby-food
-```
-
-The Pages Function then calls Amap coordinate conversion and POI around search APIs. The raw Amap response is not returned directly to the browser.
+- 后端会先把浏览器 GPS 坐标转换为高德坐标。
+- 高德周边搜索单页最多 `25` 条，本项目会自动翻页获取可返回结果。
+- 高德同一组搜索参数存在平台分页上限，因此 `reachedProviderLimit=true` 表示已加载本次查询可返回的全部结果。
 
 ## 测试 / Testing
 
@@ -204,41 +198,38 @@ npm run build
 
 当前测试覆盖：
 
-- 店铺过滤、去重和随机推荐。
-- Cloudflare Function 参数校验、缺少 key、坐标转换、POI 结果清洗。
-- 前端定位成功、定位拒绝、空接口响应提示。
-
-Current tests cover:
-
-- Shop normalization, deduplication, and random recommendation.
-- Pages Function validation, missing key handling, coordinate conversion, and POI normalization.
-- Frontend success flow, denied geolocation, and empty API response handling.
+- 高德 API key 缺失、坐标校验、坐标转换、POI 清洗。
+- 高德 POI 多页拉取、跨页去重、分页上限、QPS 节流。
+- 附近店铺随机抽取、半径切换后重新查询、单按钮再摇一次。
+- 自选分组新增、重命名、删除、保存附近店铺、正则筛选、localStorage 兼容。
 
 ## 安全说明 / Security Notes
 
 - 不要把真实高德 API key 写入源码。
 - 不要提交 `.dev.vars` 或任何本地环境变量文件。
+- `.dev.vars*` 已在 `.gitignore` 中忽略，`.dev.vars.example` 除外。
 - 高德 key 已经在聊天或本地环境中出现过时，正式部署前建议换新 key。
-- 在高德控制台为 key 设置合适的服务限制。
-- 部署后可以打开浏览器 Network 面板确认前端只请求 `/api/nearby-food`，不会直接请求高德接口，也不会暴露 key。
+- 部署后可在浏览器 Network 面板确认：前端只请求 `/api/nearby-food`，不会直接请求高德接口，也不会暴露 key。
 
-- Do not hard-code the real Amap API key in source files.
-- Do not commit `.dev.vars` or any local environment variable files.
-- Rotate the Amap key before production if it has ever been pasted into chat or local files.
-- Configure reasonable service restrictions in the Amap console.
-- After deployment, check the browser Network panel. The frontend should only call `/api/nearby-food`; it should not expose the Amap key.
+- Do not hard-code the real Amap API key.
+- Do not commit `.dev.vars` or any local env files.
+- `.dev.vars*` is ignored by Git, except `.dev.vars.example`.
+- Rotate the Amap key before production if it has appeared in chat or local files.
+- After deployment, verify the frontend only calls `/api/nearby-food`.
 
 ## 常见问题 / Troubleshooting
 
-### Failed to execute 'json' on 'Response': Unexpected end of JSON input
+### 附近店铺接口没有返回有效内容
 
-通常是本地只运行了 `npm run dev`，导致 `/api/nearby-food` 没有被 Cloudflare Pages Function 接管。请使用：
+本地通常是因为只运行了 `npm run dev`。请使用：
 
 ```bash
 npm run pages:dev
 ```
 
-This usually means the frontend is running without the Pages Function. Use:
+### Failed to execute 'json' on 'Response': Unexpected end of JSON input
+
+这通常表示前端没有连到 Cloudflare Pages Function，或者接口返回了空响应。本地完整调试请使用：
 
 ```bash
 npm run pages:dev
@@ -246,13 +237,11 @@ npm run pages:dev
 
 ### 页面提示没有配置高德 API key
 
-请确认 Cloudflare Pages 的 Production 环境变量中设置了：
+请确认本地 `.dev.vars` 或 Cloudflare Pages Production 环境变量中设置了：
 
 ```txt
 AMAP_WEB_SERVICE_KEY
 ```
-
-If the page says the Amap key is missing, make sure `AMAP_WEB_SERVICE_KEY` is configured in the Cloudflare Pages production environment.
 
 ## License
 
