@@ -6,7 +6,7 @@ export type DrawTimelineStep = {
   isFinal: boolean;
 };
 
-const DRAW_STEP_DELAYS = [45, 55, 65, 80, 100, 125, 155, 190, 235, 285, 345];
+const DRAW_STEP_DELAYS = [35, 45, 50, 60, 70, 85, 105, 130, 165, 210, 270, 340, 430, 520];
 
 export function getDrawStepDelays(): number[] {
   return [...DRAW_STEP_DELAYS];

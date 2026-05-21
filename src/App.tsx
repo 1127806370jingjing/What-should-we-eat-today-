@@ -10,6 +10,7 @@ import {
   saveCustomGroups,
   saveShopsToGroup
 } from './lib/customGroups';
+import { createDrawTimeline } from './lib/drawCeremony';
 import { chooseShop, filterShopsByRegex, getCandidateShops, normalizeShops } from './lib/recommend';
 import type { CustomGroup, FoodShop, NearbyFoodResponse, SavedShop } from './types';
 import './styles.css';
@@ -20,8 +21,6 @@ type CustomPanelMode = 'draw' | 'edit';
 type FeedbackTone = 'info' | 'error';
 
 const API_EMPTY_RESPONSE_MESSAGE = '附近店铺接口没有返回有效内容，请确认 Cloudflare Pages Function 已部署。';
-const DRAW_DURATION_MS = 620;
-const DRAW_ROLL_INTERVAL_MS = 85;
 const DEFAULT_RADIUS_METERS = 1500;
 const RADIUS_OPTIONS = [
   { label: '0.5 公里', meters: 500 },
@@ -53,8 +52,7 @@ function App() {
   const [nearbyFilter, setNearbyFilter] = useState('');
   const [selectedNearbyShopIds, setSelectedNearbyShopIds] = useState<string[]>([]);
   const [saveFeedback, setSaveFeedback] = useState('');
-  const drawTimerRef = useRef<number | undefined>(undefined);
-  const rollTimerRef = useRef<number | undefined>(undefined);
+  const drawTimerRefs = useRef<number[]>([]);
 
   const selectedGroup = customGroups.find((group) => group.id === selectedGroupId) ?? customGroups[0];
   const isBusy = status === 'locating' || status === 'loading' || status === 'drawing';
@@ -196,32 +194,39 @@ function App() {
       return;
     }
 
-    let previewIndex = 0;
+    const recommendation = chooseShop(normalized);
+
+    if (!recommendation) {
+      setStatus('error');
+      setMessage(emptyMessage);
+      return;
+    }
+
+    const timeline = createDrawTimeline(normalized, recommendation);
+    let elapsedTime = 0;
+
     setMessage('');
     setSelectedShop(null);
     setCandidateShops([]);
-    setDrawPreview(normalized[0].name);
+    setDrawPreview(timeline[0]?.shop.name ?? recommendation.name);
     setStatus('drawing');
 
-    rollTimerRef.current = window.setInterval(() => {
-      previewIndex = (previewIndex + 1) % normalized.length;
-      setDrawPreview(normalized[previewIndex].name);
-    }, DRAW_ROLL_INTERVAL_MS);
+    timeline.forEach((step, index) => {
+      elapsedTime += step.delay;
 
-    drawTimerRef.current = window.setTimeout(() => {
-      clearDrawTimers();
-      const recommendation = chooseShop(normalized);
+      const timerId = window.setTimeout(() => {
+        setDrawPreview(step.shop.name);
 
-      if (!recommendation) {
-        setStatus('error');
-        setMessage(emptyMessage);
-        return;
-      }
+        if (step.isFinal || index === timeline.length - 1) {
+          clearDrawTimers();
+          setSelectedShop(recommendation);
+          setCandidateShops(getCandidateShops(normalized, recommendation, 6));
+          setStatus('ready');
+        }
+      }, elapsedTime);
 
-      setSelectedShop(recommendation);
-      setCandidateShops(getCandidateShops(normalized, recommendation, 6));
-      setStatus('ready');
-    }, DRAW_DURATION_MS);
+      drawTimerRefs.current.push(timerId);
+    });
   }
 
   function changeMode(nextMode: DrawMode) {
@@ -361,15 +366,8 @@ function App() {
   }
 
   function clearDrawTimers() {
-    if (rollTimerRef.current) {
-      window.clearInterval(rollTimerRef.current);
-      rollTimerRef.current = undefined;
-    }
-
-    if (drawTimerRef.current) {
-      window.clearTimeout(drawTimerRef.current);
-      drawTimerRef.current = undefined;
-    }
+    drawTimerRefs.current.forEach((timerId) => window.clearTimeout(timerId));
+    drawTimerRefs.current = [];
   }
 
   const emptyText =
@@ -462,14 +460,23 @@ function App() {
 
         {status === 'drawing' ? (
           <div className="draw-ceremony">
-            <div className="shaker" aria-hidden="true">
-              <Logo />
-              <span className="draw-stick stick-a" />
-              <span className="draw-stick stick-b" />
-              <span className="draw-stick stick-c" />
+            <div className="draw-stage" aria-hidden="true">
+              <div className="shaker">
+                <Logo />
+                <span className="draw-stick stick-a" />
+                <span className="draw-stick stick-b" />
+                <span className="draw-stick stick-c" />
+              </div>
+              <div className="fortune-stick">
+                <span>今日签</span>
+              </div>
             </div>
-            <p>签筒正在摇</p>
-            <strong>正在掂量：{drawPreview}</strong>
+            <p className="draw-kicker">签筒正在摇</p>
+            <strong className="draw-preview">{drawPreview}</strong>
+            <div className="draw-meter" aria-hidden="true">
+              <span />
+            </div>
+            <p className="draw-hint">候选正在收窄</p>
           </div>
         ) : selectedShop ? (
           <>
@@ -658,17 +665,22 @@ function CustomGroupEditor({
               </button>
             </div>
 
-            <label>
-              筛选店铺（支持正则）
-              <input value={nearbyFilter} onChange={(event) => setNearbyFilter(event.target.value)} />
-            </label>
+            <div className="nearby-list-toolbar">
+              <label>
+                筛选店铺（支持正则）
+                <input value={nearbyFilter} onChange={(event) => setNearbyFilter(event.target.value)} />
+              </label>
+              <span className="shop-count-pill">
+                显示 {nearbyShops.length} / {nearbyShopCount} 家
+              </span>
+            </div>
             {nearbyFilterError ? <p className="form-message error">{nearbyFilterError}</p> : null}
             {reachedProviderLimit ? <p className="form-message">已加载高德本次查询可返回的全部结果。</p> : null}
 
-            <div className="nearby-shop-list">
+            <div className="nearby-shop-list dense-shop-list" role="list" aria-label="附近店铺列表">
               {nearbyShops.length > 0 ? (
                 nearbyShops.map((shop) => (
-                  <label className="nearby-shop-option" key={shop.id}>
+                  <label className="nearby-shop-option" key={shop.id} role="listitem">
                     <input
                       type="checkbox"
                       checked={selectedNearbyShopIds.includes(shop.id)}
@@ -677,6 +689,11 @@ function CustomGroupEditor({
                     <span className="nearby-shop-content">
                       <strong>{shop.name}</strong>
                       <small>{formatShopLine(shop)}</small>
+                    </span>
+                    <span className="shop-row-meta">
+                      {getShopMetricText(shop).map((item) => (
+                        <small key={item}>{item}</small>
+                      ))}
                     </span>
                   </label>
                 ))
@@ -700,7 +717,7 @@ function CustomGroupEditor({
           {selectedGroup ? (
             <div className="saved-shop-panel">
               <h2>当前组</h2>
-              <div className="saved-shop-list">
+              <div className="saved-shop-list dense-shop-list" role="list" aria-label="已保存店铺列表">
                 {selectedGroup.shops.length > 0 ? (
                   selectedGroup.shops.map((shop) => (
                     <SavedShopItem key={shop.id} groupName={selectedGroup.name} shop={shop} onDeleteShop={onDeleteShop} />
@@ -727,10 +744,15 @@ function SavedShopItem({
   onDeleteShop: (shopId: string) => void;
 }) {
   return (
-    <div className="saved-shop-item">
+    <div className="saved-shop-item" role="listitem">
       <span>
         <strong>{shop.name}</strong>
         <small>{formatShopLine(shop)}</small>
+      </span>
+      <span className="shop-row-meta">
+        {getShopMetricText(shop).map((item) => (
+          <small key={item}>{item}</small>
+        ))}
       </span>
       <button type="button" className="icon-danger" onClick={() => onDeleteShop(shop.id)} aria-label={`从${groupName}删除 ${shop.name}`}>
         <Trash2 size={16} />
@@ -766,6 +788,14 @@ function formatShopLine(shop: FoodShop): string {
   return [shop.distance ? `${shop.distance}m` : undefined, shop.address, shop.type?.split(';').slice(-1)[0]]
     .filter(Boolean)
     .join(' · ') || '暂无更多信息';
+}
+
+function getShopMetricText(shop: FoodShop): string[] {
+  return [
+    shop.distance ? `${shop.distance}m` : undefined,
+    shop.rating ? `${shop.rating}分` : undefined,
+    shop.cost ? `人均 ${shop.cost}` : undefined
+  ].filter((item): item is string => Boolean(item));
 }
 
 function formatCost(cost: string | undefined, note: string | undefined): string {

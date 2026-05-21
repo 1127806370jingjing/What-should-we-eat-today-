@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
 const STORAGE_KEY = 'what-to-eat:custom-groups:v1';
+const DRAW_WAIT_OPTIONS = { timeout: 3500 };
 
 function mockGeolocationSuccess() {
   const getCurrentPosition = vi.fn((success: PositionCallback) => {
@@ -58,7 +59,8 @@ describe('App', () => {
     render(<App />);
     await userEvent.click(screen.getByRole('button', { name: '今天吃什么' }));
 
-    expect(await screen.findByText('兰州牛肉面')).toBeInTheDocument();
+    expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
+    expect(screen.getByText('兰州牛肉面')).toBeInTheDocument();
     expect(screen.getByText('青年路')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '今天吃什么' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '再摇一次' })).toBeEnabled();
@@ -74,18 +76,21 @@ describe('App', () => {
         ]
       })
     );
-    vi.spyOn(Math, 'random').mockReturnValueOnce(0).mockReturnValueOnce(0.8);
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
 
     render(<App />);
     await userEvent.click(screen.getByRole('button', { name: '今天吃什么' }));
-    expect(await screen.findByText('兰州牛肉面')).toBeInTheDocument();
+    expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
+    expect(screen.getByText('兰州牛肉面')).toBeInTheDocument();
 
+    randomSpy.mockReturnValue(0.8);
     await userEvent.click(screen.getByRole('button', { name: '再摇一次' }));
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText('煲仔饭')).toBeInTheDocument();
+    expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
+    expect(screen.getByText('煲仔饭')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '今天吃什么' })).not.toBeInTheDocument();
-  });
+  }, 10000);
 
   it('resets the nearby action to fetch again after the radius changes', async () => {
     mockGeolocationSuccess();
@@ -104,18 +109,20 @@ describe('App', () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole('button', { name: '今天吃什么' }));
-    await screen.findByText('砂锅饭');
+    await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS);
+    expect(screen.getByText('砂锅饭')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: '3 公里' }));
 
     expect(screen.getByRole('button', { name: '今天吃什么' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: '再摇一次' })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: '今天吃什么' }));
-    await screen.findByText('烤肉饭');
+    await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS);
+    expect(screen.getByText('烤肉饭')).toBeInTheDocument();
 
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(JSON.parse(fetchSpy.mock.calls[1][1]?.body as string)).toMatchObject({ radius: 3000 });
-  });
+  }, 10000);
 
   it('uses the selected radius preset when fetching nearby food', async () => {
     mockGeolocationSuccess();
@@ -129,7 +136,8 @@ describe('App', () => {
     await userEvent.click(screen.getByRole('button', { name: '3 公里' }));
     await userEvent.click(screen.getByRole('button', { name: '今天吃什么' }));
 
-    await screen.findByText('砂锅饭');
+    await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS);
+    expect(screen.getByText('砂锅饭')).toBeInTheDocument();
     expect(JSON.parse(fetchSpy.mock.calls[0][1]?.body as string)).toMatchObject({
       radius: 3000
     });
@@ -213,6 +221,7 @@ describe('App', () => {
     await userEvent.click(screen.getByRole('button', { name: '获取周围店铺' }));
 
     expect(await screen.findByRole('checkbox', { name: /兰州牛肉面/ })).toBeInTheDocument();
+    expect(screen.getByRole('list', { name: '附近店铺列表' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /餐厅 30/ })).toBeInTheDocument();
     expect(screen.getByText('已找到 33 家附近店铺。')).toBeInTheDocument();
     expect(JSON.parse(fetchSpy.mock.calls[0][1]?.body as string)).toMatchObject({ radius: 3000 });
@@ -236,7 +245,9 @@ describe('App', () => {
     await userEvent.click(screen.getByRole('button', { name: '抽一个' }));
 
     expect(screen.getByText('签筒正在摇')).toBeInTheDocument();
-    expect(await screen.findByText('今日推荐')).toBeInTheDocument();
+    expect(screen.getByText('候选正在收窄')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '正在摇签' })).toBeDisabled();
+    expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
   });
 
   it('shows a provider limit hint when nearby results reach the Amap paging limit', async () => {
@@ -288,7 +299,8 @@ describe('App', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '自选抽取' }));
     await userEvent.click(screen.getByRole('button', { name: '抽一个' }));
-    expect(await screen.findByText('粥铺')).toBeInTheDocument();
+    expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
+    expect(screen.getByText('粥铺')).toBeInTheDocument();
 
     await userEvent.selectOptions(screen.getByLabelText('抽取分组'), 'meat');
 
