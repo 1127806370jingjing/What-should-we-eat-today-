@@ -7,6 +7,11 @@ export type FoodShop = {
   location?: string;
   rating?: string;
   cost?: string;
+  note?: string;
+};
+
+export type SavedShop = FoodShop & {
+  savedAt: string;
 };
 
 export type NearbyFoodRequest = {
@@ -17,4 +22,18 @@ export type NearbyFoodRequest = {
 
 export type NearbyFoodResponse = {
   shops: FoodShop[];
+  meta?: {
+    fetchedPages: number;
+    reachedProviderLimit: boolean;
+  };
+};
+
+export type CustomShop = SavedShop;
+
+export type CustomGroup = {
+  id: string;
+  name: string;
+  shops: SavedShop[];
+  createdAt: string;
+  updatedAt: string;
 };

@@ -1,32 +1,102 @@
-import { LoaderCircle, MapPin, RefreshCw, Sparkles, Utensils } from 'lucide-react';
-import { useMemo, useState } from 'react';
-import { chooseShop, normalizeShops } from './lib/recommend';
-import type { FoodShop, NearbyFoodResponse } from './types';
+import { Check, LoaderCircle, MapPin, Plus, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import Logo from './components/Logo';
+import {
+  addCustomGroup,
+  deleteCustomGroup,
+  deleteShopFromGroup,
+  loadCustomGroups,
+  renameCustomGroup,
+  saveCustomGroups,
+  saveShopsToGroup
+} from './lib/customGroups';
+import { chooseShop, filterShopsByRegex, getCandidateShops, normalizeShops } from './lib/recommend';
+import type { CustomGroup, FoodShop, NearbyFoodResponse, SavedShop } from './types';
 import './styles.css';
 
-type Status = 'idle' | 'locating' | 'loading' | 'ready' | 'error';
+type Status = 'idle' | 'locating' | 'loading' | 'drawing' | 'ready' | 'error';
+type DrawMode = 'nearby' | 'custom';
+type CustomPanelMode = 'draw' | 'edit';
+type FeedbackTone = 'info' | 'error';
 
-const DEFAULT_RADIUS = 1500;
 const API_EMPTY_RESPONSE_MESSAGE = '附近店铺接口没有返回有效内容，请确认 Cloudflare Pages Function 已部署。';
+const DRAW_DURATION_MS = 620;
+const DRAW_ROLL_INTERVAL_MS = 85;
+const DEFAULT_RADIUS_METERS = 1500;
+const RADIUS_OPTIONS = [
+  { label: '0.5 公里', meters: 500 },
+  { label: '1 公里', meters: 1000 },
+  { label: '1.5 公里', meters: 1500 },
+  { label: '3 公里', meters: 3000 },
+  { label: '5 公里', meters: 5000 }
+];
 
 function App() {
+  const [initialGroups] = useState(() => loadCustomGroups(getStorage()));
+  const [mode, setMode] = useState<DrawMode>('nearby');
+  const [customPanelMode, setCustomPanelMode] = useState<CustomPanelMode>('draw');
   const [status, setStatus] = useState<Status>('idle');
+  const [radiusMeters, setRadiusMeters] = useState(DEFAULT_RADIUS_METERS);
   const [shops, setShops] = useState<FoodShop[]>([]);
+  const [nearbyMeta, setNearbyMeta] = useState<NearbyFoodResponse['meta']>();
+  const [loadedRadiusMeters, setLoadedRadiusMeters] = useState<number | null>(null);
+  const [candidateShops, setCandidateShops] = useState<FoodShop[]>([]);
   const [selectedShop, setSelectedShop] = useState<FoodShop | null>(null);
   const [message, setMessage] = useState('');
+  const [drawPreview, setDrawPreview] = useState('今天吃什么');
+  const [customGroups, setCustomGroups] = useState<CustomGroup[]>(initialGroups);
+  const [selectedGroupId, setSelectedGroupId] = useState(initialGroups[0]?.id ?? '');
+  const [newGroupName, setNewGroupName] = useState('');
+  const [groupNameDraft, setGroupNameDraft] = useState('');
+  const [groupFeedback, setGroupFeedback] = useState('');
+  const [groupFeedbackTone, setGroupFeedbackTone] = useState<FeedbackTone>('info');
+  const [nearbyFilter, setNearbyFilter] = useState('');
+  const [selectedNearbyShopIds, setSelectedNearbyShopIds] = useState<string[]>([]);
+  const [saveFeedback, setSaveFeedback] = useState('');
+  const drawTimerRef = useRef<number | undefined>(undefined);
+  const rollTimerRef = useRef<number | undefined>(undefined);
 
-  const shopCountText = useMemo(() => {
-    if (shops.length === 0) {
-      return '等你按下按钮';
-    }
+  const selectedGroup = customGroups.find((group) => group.id === selectedGroupId) ?? customGroups[0];
+  const isBusy = status === 'locating' || status === 'loading' || status === 'drawing';
+  const radiusLabel = RADIUS_OPTIONS.find((option) => option.meters === radiusMeters)?.label ?? '1.5 公里';
+  const filteredNearbyResult = useMemo(() => filterShopsByRegex(shops, nearbyFilter), [shops, nearbyFilter]);
+  const filteredNearbyShops = filteredNearbyResult.shops;
+  const isNearbyPoolFresh = shops.length > 0 && loadedRadiusMeters === radiusMeters;
+  const canReroll = Boolean(selectedShop && (mode === 'custom' || isNearbyPoolFresh));
+  const mainActionLabel = isBusy ? '正在摇签' : mode === 'nearby' ? (canReroll ? '再摇一次' : '今天吃什么') : canReroll ? '再摇一次' : '抽一个';
+  const shopCountText =
+    mode === 'nearby'
+      ? shops.length > 0
+        ? `附近 ${shops.length} 家店`
+        : '等你按下按钮'
+      : selectedGroup
+        ? `${selectedGroup.name} 已保存 ${selectedGroup.shops.length} 家`
+        : '还没有分组';
 
-    return `附近 ${shops.length} 家店`;
-  }, [shops.length]);
+  useEffect(() => {
+    setGroupNameDraft(selectedGroup?.name ?? '');
+  }, [selectedGroup?.id, selectedGroup?.name]);
 
-  async function handleStart() {
+  useEffect(() => {
+    return () => {
+      clearDrawTimers();
+    };
+  }, []);
+
+  async function handleNearbyStart() {
+    await queryNearbyShops(true);
+  }
+
+  async function handleFetchNearbyForCustom() {
+    await queryNearbyShops(false);
+  }
+
+  async function queryNearbyShops(drawAfterLoad: boolean) {
     setStatus('locating');
     setMessage('');
+    setSaveFeedback('');
     setSelectedShop(null);
+    setCandidateShops([]);
 
     try {
       const position = await getCurrentPosition();
@@ -40,7 +110,7 @@ function App() {
         body: JSON.stringify({
           lat: position.coords.latitude,
           lng: position.coords.longitude,
-          radius: DEFAULT_RADIUS
+          radius: radiusMeters
         })
       });
       const data = await readNearbyFoodResponse(response);
@@ -58,108 +128,653 @@ function App() {
       }
 
       const normalized = normalizeShops(data.shops);
-      const recommendation = chooseShop(normalized);
+      setShops(normalized);
+      setNearbyMeta(data.meta);
+      setLoadedRadiusMeters(radiusMeters);
+      setSelectedNearbyShopIds((current) =>
+        current.filter((shopId) => normalized.some((shop) => shop.id === shopId))
+      );
 
-      if (!recommendation) {
-        setShops([]);
-        setSelectedShop(null);
-        setMessage('附近没找到餐饮店，换个位置或稍后再试试。');
-        setStatus('error');
+      if (drawAfterLoad) {
+        beginDraw(normalized, '附近没找到餐饮店，换个位置或稍后再试试。');
         return;
       }
 
-      setShops(normalized);
-      setSelectedShop(recommendation);
-      setStatus('ready');
+      setStatus(normalized.length > 0 ? 'idle' : 'error');
+      setMessage(normalized.length > 0 ? `已找到 ${normalized.length} 家附近店铺。` : '附近没找到餐饮店，换个位置或稍后再试试。');
     } catch (error) {
+      clearDrawTimers();
       setStatus('error');
       setMessage(getFriendlyError(error));
     }
   }
 
-  function handleReroll() {
-    const nextShop = chooseShop(shops);
+  function handleCustomDraw() {
+    const customPool = getSelectedCustomPool();
+    beginDraw(customPool, `${selectedGroup?.name ?? '这个分组'}还没有保存店铺，请先从附近店铺勾选保存。`);
+  }
 
-    if (nextShop) {
-      setSelectedShop(nextShop);
-      setMessage('');
+  function handleReroll() {
+    const pool = mode === 'nearby' ? shops : getSelectedCustomPool();
+    beginDraw(
+      pool,
+      mode === 'nearby'
+        ? '附近没找到餐饮店，换个位置或稍后再试试。'
+        : '当前分组还没有保存店铺，请先从附近店铺勾选保存。'
+    );
+  }
+
+  async function handlePrimaryAction() {
+    if (mode === 'nearby') {
+      if (canReroll) {
+        handleReroll();
+        return;
+      }
+
+      await handleNearbyStart();
+      return;
+    }
+
+    if (canReroll) {
+      handleReroll();
+      return;
+    }
+
+    handleCustomDraw();
+  }
+
+  function beginDraw(pool: FoodShop[], emptyMessage: string) {
+    const normalized = normalizeShops(pool);
+
+    clearDrawTimers();
+
+    if (normalized.length === 0) {
+      setSelectedShop(null);
+      setCandidateShops([]);
+      setMessage(emptyMessage);
+      setStatus('error');
+      return;
+    }
+
+    let previewIndex = 0;
+    setMessage('');
+    setSelectedShop(null);
+    setCandidateShops([]);
+    setDrawPreview(normalized[0].name);
+    setStatus('drawing');
+
+    rollTimerRef.current = window.setInterval(() => {
+      previewIndex = (previewIndex + 1) % normalized.length;
+      setDrawPreview(normalized[previewIndex].name);
+    }, DRAW_ROLL_INTERVAL_MS);
+
+    drawTimerRef.current = window.setTimeout(() => {
+      clearDrawTimers();
+      const recommendation = chooseShop(normalized);
+
+      if (!recommendation) {
+        setStatus('error');
+        setMessage(emptyMessage);
+        return;
+      }
+
+      setSelectedShop(recommendation);
+      setCandidateShops(getCandidateShops(normalized, recommendation, 6));
       setStatus('ready');
+    }, DRAW_DURATION_MS);
+  }
+
+  function changeMode(nextMode: DrawMode) {
+    clearDrawTimers();
+    setMode(nextMode);
+    setCustomPanelMode('draw');
+    setStatus('idle');
+    setMessage('');
+    setSelectedShop(null);
+    setCandidateShops([]);
+  }
+
+  function changeRadius(nextRadiusMeters: number) {
+    if (nextRadiusMeters === radiusMeters) {
+      return;
+    }
+
+    clearDrawTimers();
+    setRadiusMeters(nextRadiusMeters);
+    setLoadedRadiusMeters(null);
+    setNearbyMeta(undefined);
+    setShops([]);
+    setSelectedNearbyShopIds([]);
+    setStatus('idle');
+    setMessage('');
+    setSaveFeedback('');
+    setSelectedShop(null);
+    setCandidateShops([]);
+  }
+
+  function selectCustomGroup(groupId: string) {
+    clearDrawTimers();
+    setSelectedGroupId(groupId);
+    setStatus('idle');
+    setMessage('');
+    setSelectedShop(null);
+    setCandidateShops([]);
+  }
+
+  function commitCustomGroups(nextGroups: CustomGroup[]) {
+    const stableGroups = nextGroups.length > 0 ? nextGroups : loadCustomGroups(undefined);
+    setCustomGroups(stableGroups);
+    saveCustomGroups(getStorage(), stableGroups);
+    setSelectedGroupId((currentGroupId) =>
+      stableGroups.some((group) => group.id === currentGroupId) ? currentGroupId : stableGroups[0]?.id ?? ''
+    );
+  }
+
+  function showGroupFeedback(text: string, tone: FeedbackTone = 'info') {
+    setGroupFeedback(text);
+    setGroupFeedbackTone(tone);
+  }
+
+  function handleAddGroup() {
+    const result = addCustomGroup(customGroups, newGroupName);
+
+    if (result.error) {
+      showGroupFeedback(result.error, 'error');
+      return;
+    }
+
+    commitCustomGroups(result.groups);
+    selectCustomGroup(result.group?.id ?? selectedGroupId);
+    setNewGroupName('');
+    showGroupFeedback(`已创建 ${result.group?.name ?? '新分组'}。`);
+  }
+
+  function handleRenameGroup() {
+    if (!selectedGroup) {
+      return;
+    }
+
+    const result = renameCustomGroup(customGroups, selectedGroup.id, groupNameDraft);
+
+    if (result.error) {
+      showGroupFeedback(result.error, 'error');
+      return;
+    }
+
+    commitCustomGroups(result.groups);
+    showGroupFeedback('分组名称已保存。');
+  }
+
+  function handleDeleteGroup() {
+    if (!selectedGroup || customGroups.length <= 1) {
+      showGroupFeedback('至少保留一个分组。', 'error');
+      return;
+    }
+
+    if (!window.confirm(`删除「${selectedGroup.name}」吗？`)) {
+      return;
+    }
+
+    commitCustomGroups(deleteCustomGroup(customGroups, selectedGroup.id));
+    showGroupFeedback('分组已删除。');
+  }
+
+  function handleSaveSelectedNearbyShops() {
+    if (!selectedGroup) {
+      return;
+    }
+
+    if (selectedNearbyShopIds.length === 0) {
+      setSaveFeedback('先勾选店铺。');
+      return;
+    }
+
+    const selectedNearbyShops = shops.filter((shop) => selectedNearbyShopIds.includes(shop.id));
+    const result = saveShopsToGroup(customGroups, selectedGroup.id, selectedNearbyShops);
+
+    if (result.error) {
+      setSaveFeedback(result.error);
+      return;
+    }
+
+    commitCustomGroups(result.groups);
+    setSelectedNearbyShopIds([]);
+    setSaveFeedback(`新增 ${result.savedCount} 个，已存在 ${result.skippedCount} 个。`);
+  }
+
+  function handleDeleteShop(shopId: string) {
+    if (!selectedGroup) {
+      return;
+    }
+
+    commitCustomGroups(deleteShopFromGroup(customGroups, selectedGroup.id, shopId));
+  }
+
+  function toggleNearbyShop(shopId: string) {
+    setSelectedNearbyShopIds((current) =>
+      current.includes(shopId) ? current.filter((currentId) => currentId !== shopId) : [...current, shopId]
+    );
+  }
+
+  function getSelectedCustomPool(): FoodShop[] {
+    return selectedGroup?.shops ?? [];
+  }
+
+  function clearDrawTimers() {
+    if (rollTimerRef.current) {
+      window.clearInterval(rollTimerRef.current);
+      rollTimerRef.current = undefined;
+    }
+
+    if (drawTimerRef.current) {
+      window.clearTimeout(drawTimerRef.current);
+      drawTimerRef.current = undefined;
     }
   }
 
-  const isBusy = status === 'locating' || status === 'loading';
+  const emptyText =
+    message ||
+    (mode === 'custom' && selectedGroup && selectedGroup.shops.length === 0
+      ? `${selectedGroup.name}还没有保存店铺，请先从附近店铺勾选保存。`
+      : '按下按钮，让附近的店铺替你做决定。');
 
   return (
     <main className="app-shell">
       <section className="decision-panel" aria-labelledby="page-title">
         <div className="brand-row">
-          <span className="brand-mark" aria-hidden="true">
-            <Utensils size={24} />
+          <span className="brand-mark">
+            <Logo />
           </span>
           <span>今天吃什么</span>
         </div>
 
         <div className="headline-block">
-          <p className="eyebrow">1.5 公里内真实店铺</p>
+          <p className="eyebrow">{mode === 'nearby' ? `${radiusLabel}内真实店铺` : '自选组里抽签'}</p>
           <h1 id="page-title">把选择困难交给附近的饭香</h1>
-          <p className="intro">定位后自动找周围餐饮店，轻轻一摇，今天就它了。</p>
+          <p className="intro">附近随机和自选清单都能抽，签筒摇一摇，今天就它了。</p>
         </div>
+
+        <div className="mode-switch" aria-label="抽取模式">
+          <button type="button" className={mode === 'nearby' ? 'active' : ''} onClick={() => changeMode('nearby')}>
+            随机抽取
+          </button>
+          <button type="button" className={mode === 'custom' ? 'active' : ''} onClick={() => changeMode('custom')}>
+            自选抽取
+          </button>
+        </div>
+
+        <RadiusSelector radiusMeters={radiusMeters} setRadiusMeters={changeRadius} />
+
+        {mode === 'custom' ? (
+          <CustomGroupEditor
+            panelMode={customPanelMode}
+            customGroups={customGroups}
+            selectedGroup={selectedGroup}
+            selectedGroupId={selectedGroupId}
+            onSelectGroup={selectCustomGroup}
+            newGroupName={newGroupName}
+            setNewGroupName={setNewGroupName}
+            groupNameDraft={groupNameDraft}
+            setGroupNameDraft={setGroupNameDraft}
+            groupFeedback={groupFeedback}
+            groupFeedbackTone={groupFeedbackTone}
+            nearbyFilter={nearbyFilter}
+            setNearbyFilter={setNearbyFilter}
+            nearbyShops={filteredNearbyShops}
+            nearbyShopCount={shops.length}
+            nearbyFilterError={filteredNearbyResult.error}
+            reachedProviderLimit={nearbyMeta?.reachedProviderLimit ?? false}
+            selectedNearbyShopIds={selectedNearbyShopIds}
+            saveFeedback={saveFeedback}
+            isBusy={isBusy}
+            onAddGroup={handleAddGroup}
+            onRenameGroup={handleRenameGroup}
+            onDeleteGroup={handleDeleteGroup}
+            onFetchNearby={handleFetchNearbyForCustom}
+            onToggleNearbyShop={toggleNearbyShop}
+            onSaveSelectedNearbyShops={handleSaveSelectedNearbyShops}
+            onDeleteShop={handleDeleteShop}
+            onEditGroups={() => setCustomPanelMode('edit')}
+            onBackToDraw={() => setCustomPanelMode('draw')}
+          />
+        ) : null}
 
         <div className="action-row">
-          <button className="primary-button" type="button" onClick={handleStart} disabled={isBusy}>
-            {isBusy ? <LoaderCircle className="spin" size={20} /> : <Sparkles size={20} />}
-            <span>{isBusy ? '正在寻找' : '今天吃什么'}</span>
-          </button>
           <button
-            className="secondary-button"
+            className="primary-button"
             type="button"
-            onClick={handleReroll}
-            disabled={shops.length === 0 || isBusy}
+            onClick={handlePrimaryAction}
+            disabled={isBusy}
           >
-            <RefreshCw size={19} />
-            <span>再摇一次</span>
+            {isBusy ? <LoaderCircle className="spin" size={20} /> : canReroll ? <RefreshCw size={20} /> : <Sparkles size={20} />}
+            <span>{mainActionLabel}</span>
           </button>
         </div>
 
-        <p className="privacy-note">定位只用于本次查询，高德 key 保存在 Cloudflare 后端。</p>
+        <p className="privacy-note">定位只用于本次查询，高德 key 保存在 Cloudflare 后端；自选组只存在当前浏览器。</p>
       </section>
 
       <section className="result-area" aria-live="polite">
         <div className="status-strip">
           <span>{shopCountText}</span>
-          <span>默认 1.5km</span>
+          <span>{mode === 'nearby' ? `默认 ${radiusLabel}` : `附近列表 ${shops.length} 家`}</span>
         </div>
 
-        {selectedShop ? (
-          <article className="shop-card">
-            <div className="card-topline">
-              <span className="tag">今日推荐</span>
-              {selectedShop.distance ? <span>{selectedShop.distance}m</span> : null}
+        {status === 'drawing' ? (
+          <div className="draw-ceremony">
+            <div className="shaker" aria-hidden="true">
+              <Logo />
+              <span className="draw-stick stick-a" />
+              <span className="draw-stick stick-b" />
+              <span className="draw-stick stick-c" />
             </div>
-            <h2>{selectedShop.name}</h2>
-            {selectedShop.address ? (
-              <p className="address">
-                <MapPin size={18} />
-                <span>{selectedShop.address}</span>
-              </p>
+            <p>签筒正在摇</p>
+            <strong>正在掂量：{drawPreview}</strong>
+          </div>
+        ) : selectedShop ? (
+          <>
+            <ShopResultCard shop={selectedShop} />
+            {candidateShops.length > 0 ? (
+              <div className="candidate-list">
+                <h3>其他可以选项</h3>
+                <div className="candidate-grid">
+                  {candidateShops.map((shop) => (
+                    <span key={shop.id}>
+                      {shop.name}
+                      {shop.distance ? <small>{shop.distance}m</small> : null}
+                    </span>
+                  ))}
+                </div>
+              </div>
             ) : null}
-            <div className="meta-grid">
-              <span>{selectedShop.type?.split(';').slice(-1)[0] || '餐饮店'}</span>
-              <span>{selectedShop.rating ? `${selectedShop.rating} 分` : '评分未知'}</span>
-              <span>{selectedShop.cost ? `人均 ¥${Number(selectedShop.cost).toFixed(0)}` : '人均未知'}</span>
-            </div>
-          </article>
+          </>
         ) : (
           <div className="empty-state">
-            <Sparkles size={34} />
-            <p>{message || '按下按钮，让附近的店铺替你做决定。'}</p>
+            <Logo />
+            <p>{emptyText}</p>
           </div>
         )}
-
-        {message && selectedShop ? <p className="message">{message}</p> : null}
       </section>
     </main>
   );
+}
+
+function RadiusSelector({
+  radiusMeters,
+  setRadiusMeters
+}: {
+  radiusMeters: number;
+  setRadiusMeters: (value: number) => void;
+}) {
+  return (
+    <div className="control-block">
+      <p className="control-title">默认半径</p>
+      <div className="radius-options" aria-label="默认半径">
+        {RADIUS_OPTIONS.map((option) => (
+          <button
+            key={option.meters}
+            type="button"
+            className={radiusMeters === option.meters ? 'selected' : ''}
+            onClick={() => setRadiusMeters(option.meters)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type CustomGroupEditorProps = {
+  panelMode: CustomPanelMode;
+  customGroups: CustomGroup[];
+  selectedGroup: CustomGroup | undefined;
+  selectedGroupId: string;
+  onSelectGroup: (groupId: string) => void;
+  newGroupName: string;
+  setNewGroupName: (value: string) => void;
+  groupNameDraft: string;
+  setGroupNameDraft: (value: string) => void;
+  groupFeedback: string;
+  groupFeedbackTone: FeedbackTone;
+  nearbyFilter: string;
+  setNearbyFilter: (value: string) => void;
+  nearbyShops: FoodShop[];
+  nearbyShopCount: number;
+  nearbyFilterError?: string;
+  reachedProviderLimit: boolean;
+  selectedNearbyShopIds: string[];
+  saveFeedback: string;
+  isBusy: boolean;
+  onAddGroup: () => void;
+  onRenameGroup: () => void;
+  onDeleteGroup: () => void;
+  onFetchNearby: () => void;
+  onToggleNearbyShop: (shopId: string) => void;
+  onSaveSelectedNearbyShops: () => void;
+  onDeleteShop: (shopId: string) => void;
+  onEditGroups: () => void;
+  onBackToDraw: () => void;
+};
+
+function CustomGroupEditor({
+  panelMode,
+  customGroups,
+  selectedGroup,
+  selectedGroupId,
+  onSelectGroup,
+  newGroupName,
+  setNewGroupName,
+  groupNameDraft,
+  setGroupNameDraft,
+  groupFeedback,
+  groupFeedbackTone,
+  nearbyFilter,
+  setNearbyFilter,
+  nearbyShops,
+  nearbyShopCount,
+  nearbyFilterError,
+  reachedProviderLimit,
+  selectedNearbyShopIds,
+  saveFeedback,
+  isBusy,
+  onAddGroup,
+  onRenameGroup,
+  onDeleteGroup,
+  onFetchNearby,
+  onToggleNearbyShop,
+  onSaveSelectedNearbyShops,
+  onDeleteShop,
+  onEditGroups,
+  onBackToDraw
+}: CustomGroupEditorProps) {
+  return (
+    <div className="custom-editor">
+      <div className="group-selector-row">
+        <label>
+          抽取分组
+          <select value={selectedGroupId} onChange={(event) => onSelectGroup(event.target.value)}>
+            {customGroups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span>{selectedGroup ? `${selectedGroup.shops.length} 家已保存` : '无分组'}</span>
+        {panelMode === 'draw' ? (
+          <button type="button" onClick={onEditGroups}>
+            修改分组
+          </button>
+        ) : null}
+      </div>
+
+      {panelMode === 'edit' ? (
+        <>
+          <div className="panel-heading">
+            <h2>编辑自选分组</h2>
+            <button type="button" onClick={onBackToDraw}>
+              返回抽取
+            </button>
+          </div>
+
+          <div className="group-management">
+            <div className="inline-form">
+              <label>
+                新建分组名称
+                <input value={newGroupName} onChange={(event) => setNewGroupName(event.target.value)} />
+              </label>
+              <button type="button" onClick={onAddGroup}>
+                <Plus size={16} />
+                创建分组
+              </button>
+            </div>
+
+            {selectedGroup ? (
+              <div className="inline-form">
+                <label>
+                  重命名当前组
+                  <input value={groupNameDraft} onChange={(event) => setGroupNameDraft(event.target.value)} />
+                </label>
+                <button type="button" onClick={onRenameGroup}>
+                  保存名称
+                </button>
+                <button type="button" className="ghost-danger" onClick={onDeleteGroup} disabled={customGroups.length <= 1}>
+                  <Trash2 size={16} />
+                  删除当前组
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          {groupFeedback ? <p className={`form-message ${groupFeedbackTone === 'error' ? 'error' : ''}`}>{groupFeedback}</p> : null}
+
+          <div className="nearby-save-panel">
+            <div className="panel-heading">
+              <h2>附近店铺</h2>
+              <button type="button" onClick={onFetchNearby} disabled={isBusy}>
+                {isBusy ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}
+                获取周围店铺
+              </button>
+            </div>
+
+            <label>
+              筛选店铺（支持正则）
+              <input value={nearbyFilter} onChange={(event) => setNearbyFilter(event.target.value)} />
+            </label>
+            {nearbyFilterError ? <p className="form-message error">{nearbyFilterError}</p> : null}
+            {reachedProviderLimit ? <p className="form-message">已加载高德本次查询可返回的全部结果。</p> : null}
+
+            <div className="nearby-shop-list">
+              {nearbyShops.length > 0 ? (
+                nearbyShops.map((shop) => (
+                  <label className="nearby-shop-option" key={shop.id}>
+                    <input
+                      type="checkbox"
+                      checked={selectedNearbyShopIds.includes(shop.id)}
+                      onChange={() => onToggleNearbyShop(shop.id)}
+                    />
+                    <span className="nearby-shop-content">
+                      <strong>{shop.name}</strong>
+                      <small>{formatShopLine(shop)}</small>
+                    </span>
+                  </label>
+                ))
+              ) : (
+                <p className="muted-line">
+                  {nearbyShopCount > 0 ? '没有匹配的店铺。' : '先获取周围店铺。'}
+                </p>
+              )}
+            </div>
+
+            <div className="save-row">
+              <button type="button" onClick={onSaveSelectedNearbyShops} disabled={!selectedGroup || selectedNearbyShopIds.length === 0}>
+                <Check size={16} />
+                保存到当前组
+              </button>
+              <span>已勾选 {selectedNearbyShopIds.length} 家</span>
+            </div>
+            {saveFeedback ? <p className="form-message">{saveFeedback}</p> : null}
+          </div>
+
+          {selectedGroup ? (
+            <div className="saved-shop-panel">
+              <h2>当前组</h2>
+              <div className="saved-shop-list">
+                {selectedGroup.shops.length > 0 ? (
+                  selectedGroup.shops.map((shop) => (
+                    <SavedShopItem key={shop.id} groupName={selectedGroup.name} shop={shop} onDeleteShop={onDeleteShop} />
+                  ))
+                ) : (
+                  <p className="muted-line">还没有保存店铺。</p>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function SavedShopItem({
+  groupName,
+  shop,
+  onDeleteShop
+}: {
+  groupName: string;
+  shop: SavedShop;
+  onDeleteShop: (shopId: string) => void;
+}) {
+  return (
+    <div className="saved-shop-item">
+      <span>
+        <strong>{shop.name}</strong>
+        <small>{formatShopLine(shop)}</small>
+      </span>
+      <button type="button" className="icon-danger" onClick={() => onDeleteShop(shop.id)} aria-label={`从${groupName}删除 ${shop.name}`}>
+        <Trash2 size={16} />
+      </button>
+    </div>
+  );
+}
+
+function ShopResultCard({ shop }: { shop: FoodShop }) {
+  return (
+    <article className="shop-card">
+      <div className="card-topline">
+        <span className="tag">今日推荐</span>
+        {shop.distance ? <span>{shop.distance}m</span> : null}
+      </div>
+      <h2>{shop.name}</h2>
+      {shop.address ? (
+        <p className="address">
+          <MapPin size={18} />
+          <span>{shop.address}</span>
+        </p>
+      ) : null}
+      <div className="meta-grid">
+        <span>{shop.type?.split(';').slice(-1)[0] || '自选店铺'}</span>
+        <span>{shop.rating ? `${shop.rating} 分` : '评分未知'}</span>
+        <span>{formatCost(shop.cost, shop.note)}</span>
+      </div>
+    </article>
+  );
+}
+
+function formatShopLine(shop: FoodShop): string {
+  return [shop.distance ? `${shop.distance}m` : undefined, shop.address, shop.type?.split(';').slice(-1)[0]]
+    .filter(Boolean)
+    .join(' · ') || '暂无更多信息';
+}
+
+function formatCost(cost: string | undefined, note: string | undefined): string {
+  if (!cost) {
+    return note ? '有备注' : '人均未知';
+  }
+
+  const numericCost = Number(cost);
+  return Number.isFinite(numericCost) ? `人均 ¥${numericCost.toFixed(0)}` : '人均未知';
 }
 
 function getCurrentPosition(): Promise<GeolocationPosition> {
@@ -206,6 +821,10 @@ function getFriendlyError(error: unknown): string {
 
 function isGeolocationError(error: unknown): error is GeolocationPositionError {
   return typeof error === 'object' && error !== null && 'code' in error && 'PERMISSION_DENIED' in error;
+}
+
+function getStorage(): Storage | undefined {
+  return typeof window === 'undefined' ? undefined : window.localStorage;
 }
 
 export default App;

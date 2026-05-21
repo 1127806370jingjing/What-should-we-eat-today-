@@ -38,6 +38,9 @@ const AMAP_CONVERT_URL = 'https://restapi.amap.com/v3/assistant/coordinate/conve
 const AMAP_AROUND_URL = 'https://restapi.amap.com/v5/place/around';
 const DEFAULT_RADIUS = 1500;
 const MAX_RADIUS = 5000;
+const PAGE_SIZE = 25;
+const MAX_PAGE_NUM = 8;
+const PAGE_DELAY_MS = 250;
 
 export async function onRequestPost(context: FunctionContext): Promise<Response> {
   if (!context.env.AMAP_WEB_SERVICE_KEY) {
@@ -63,9 +66,9 @@ export async function onRequestPost(context: FunctionContext): Promise<Response>
       payload.lat,
       context.env.AMAP_WEB_SERVICE_KEY
     );
-    const shops = await fetchNearbyFood(amapLocation, radius, context.env.AMAP_WEB_SERVICE_KEY);
+    const nearbyFood = await fetchNearbyFood(amapLocation, radius, context.env.AMAP_WEB_SERVICE_KEY);
 
-    return json<NearbyFoodResponse>({ shops });
+    return json<NearbyFoodResponse>(nearbyFood);
   } catch (error) {
     const message = error instanceof Error ? error.message : '附近店铺查询失败';
     return json({ error: message }, 502);
@@ -117,14 +120,51 @@ async function convertToAmapCoordinate(lng: number, lat: number, key: string): P
   return data.locations.split(';')[0];
 }
 
-async function fetchNearbyFood(location: string, radius: number, key: string): Promise<FoodShop[]> {
+async function fetchNearbyFood(location: string, radius: number, key: string): Promise<NearbyFoodResponse> {
+  const seen = new Set<string>();
+  const shops: FoodShop[] = [];
+  let fetchedPages = 0;
+  let reachedProviderLimit = false;
+
+  for (let pageNum = 1; pageNum <= MAX_PAGE_NUM; pageNum += 1) {
+    const pois = await fetchNearbyFoodPage(location, radius, key, pageNum);
+    fetchedPages = pageNum;
+    shops.push(...normalizePois(pois, seen));
+
+    if (pois.length < PAGE_SIZE) {
+      return {
+        shops,
+        meta: {
+          fetchedPages,
+          reachedProviderLimit: false
+        }
+      };
+    }
+
+    reachedProviderLimit = pageNum === MAX_PAGE_NUM;
+
+    if (!reachedProviderLimit) {
+      await delay(PAGE_DELAY_MS);
+    }
+  }
+
+  return {
+    shops,
+    meta: {
+      fetchedPages,
+      reachedProviderLimit
+    }
+  };
+}
+
+async function fetchNearbyFoodPage(location: string, radius: number, key: string, pageNum: number): Promise<AmapPoi[]> {
   const url = new URL(AMAP_AROUND_URL);
   url.searchParams.set('key', key);
   url.searchParams.set('location', location);
   url.searchParams.set('radius', String(radius));
   url.searchParams.set('types', '050000');
-  url.searchParams.set('page_size', '25');
-  url.searchParams.set('page_num', '1');
+  url.searchParams.set('page_size', String(PAGE_SIZE));
+  url.searchParams.set('page_num', String(pageNum));
   url.searchParams.set('show_fields', 'business');
   url.searchParams.set('output', 'json');
 
@@ -135,11 +175,10 @@ async function fetchNearbyFood(location: string, radius: number, key: string): P
     throw new Error(data.info || '附近餐饮查询失败');
   }
 
-  return normalizePois(data.pois ?? []);
+  return data.pois ?? [];
 }
 
-function normalizePois(pois: AmapPoi[]): FoodShop[] {
-  const seen = new Set<string>();
+function normalizePois(pois: AmapPoi[], seen = new Set<string>()): FoodShop[] {
   const shops: FoodShop[] = [];
 
   for (const poi of pois) {
@@ -177,6 +216,12 @@ function normalizeAddress(address: AmapPoi['address']): string | undefined {
 function normalizeDistance(distance: AmapPoi['distance']): number | undefined {
   const value = typeof distance === 'string' ? Number(distance) : distance;
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function json<T>(body: T, status = 200): Response {
