@@ -1,4 +1,4 @@
-import { Check, LoaderCircle, MapPin, Plus, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react';
+import { Check, LoaderCircle, MapPin, Navigation, Plus, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Logo from './components/Logo';
 import {
@@ -762,6 +762,8 @@ function SavedShopItem({
 }
 
 function ShopResultCard({ shop }: { shop: FoodShop }) {
+  const navigationHref = getAmapNavigationHref(shop);
+
   return (
     <article className="shop-card">
       <div className="card-topline">
@@ -775,6 +777,12 @@ function ShopResultCard({ shop }: { shop: FoodShop }) {
           <span>{shop.address}</span>
         </p>
       ) : null}
+      {navigationHref ? (
+        <a className="navigation-link" href={navigationHref} target="_blank" rel="noreferrer">
+          <Navigation size={18} />
+          <span>高德导航</span>
+        </a>
+      ) : null}
       <div className="meta-grid">
         <span>{shop.type?.split(';').slice(-1)[0] || '自选店铺'}</span>
         <span>{shop.rating ? `${shop.rating} 分` : '评分未知'}</span>
@@ -782,6 +790,43 @@ function ShopResultCard({ shop }: { shop: FoodShop }) {
       </div>
     </article>
   );
+}
+
+function getAmapNavigationHref(shop: FoodShop): string | undefined {
+  const location = parseAmapLocation(shop.location);
+
+  if (!location) {
+    return undefined;
+  }
+
+  const params = new URLSearchParams({
+    to: `${location.lng},${location.lat},${shop.name}`,
+    mode: 'walk',
+    src: 'what-to-eat-today',
+    callnative: '1'
+  });
+
+  return `https://uri.amap.com/navigation?${params.toString()}`;
+}
+
+function parseAmapLocation(location: string | undefined): { lng: string; lat: string } | undefined {
+  if (!location) {
+    return undefined;
+  }
+
+  const [lng, lat] = location.split(',').map((value) => value.trim());
+  const numericLng = Number(lng);
+  const numericLat = Number(lat);
+
+  if (!lng || !lat || !Number.isFinite(numericLng) || !Number.isFinite(numericLat)) {
+    return undefined;
+  }
+
+  if (numericLng < -180 || numericLng > 180 || numericLat < -90 || numericLat > 90) {
+    return undefined;
+  }
+
+  return { lng, lat };
 }
 
 function formatShopLine(shop: FoodShop): string {

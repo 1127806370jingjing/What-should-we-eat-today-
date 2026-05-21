@@ -49,7 +49,7 @@ describe('App', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       Response.json({
         shops: [
-          { id: '1', name: '兰州牛肉面', distance: 220, address: '青年路' },
+          { id: '1', name: '兰州牛肉面', distance: 220, address: '青年路', location: '121.500100,31.200200' },
           { id: '2', name: '煲仔饭', distance: 350, address: '中山路' }
         ]
       })
@@ -62,6 +62,22 @@ describe('App', () => {
     expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
     expect(screen.getByText('兰州牛肉面')).toBeInTheDocument();
     expect(screen.getByText('青年路')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '高德导航' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('https://uri.amap.com/navigation?')
+    );
+    expect(screen.getByRole('link', { name: '高德导航' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('callnative=1')
+    );
+    expect(screen.getByRole('link', { name: '高德导航' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('mode=walk')
+    );
+    expect(screen.getByRole('link', { name: '高德导航' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('to=121.500100%2C31.200200%2C%E5%85%B0%E5%B7%9E%E7%89%9B%E8%82%89%E9%9D%A2')
+    );
     expect(screen.queryByRole('button', { name: '今天吃什么' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '再摇一次' })).toBeEnabled();
   });
