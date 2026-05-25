@@ -11,17 +11,26 @@ import {
   saveShopsToGroup
 } from './lib/customGroups';
 import { createDrawTimeline } from './lib/drawCeremony';
-import { chooseShop, filterShopsByRegex, getCandidateShops, normalizeShops } from './lib/recommend';
-import type { CustomGroup, FoodShop, NearbyFoodResponse, SavedShop } from './types';
+import {
+  FOOD_CATEGORIES,
+  annotateShopCategory,
+  chooseWeightedShop,
+  loadSelectedCategoryIds,
+  saveSelectedCategoryIds,
+  toggleSelectedCategoryId
+} from './lib/foodCategories';
+import { filterShopsByRegex, getCandidateShops, normalizeShops } from './lib/recommend';
+import type { ClassifiedShop, CustomGroup, FoodShop, NearbyFoodResponse, SavedShop } from './types';
 import './styles.css';
 
-type Status = 'idle' | 'locating' | 'loading' | 'drawing' | 'ready' | 'error';
+type Status = 'idle' | 'locating' | 'loading' | 'drawing' | 'revealing' | 'ready' | 'error';
 type DrawMode = 'nearby' | 'custom';
 type CustomPanelMode = 'draw' | 'edit';
 type FeedbackTone = 'info' | 'error';
 
 const API_EMPTY_RESPONSE_MESSAGE = '附近店铺接口没有返回有效内容，请确认 Cloudflare Pages Function 已部署。';
 const DEFAULT_RADIUS_METERS = 1500;
+const FINAL_REVEAL_DELAY_MS = 1000;
 const RADIUS_OPTIONS = [
   { label: '0.5 公里', meters: 500 },
   { label: '1 公里', meters: 1000 },
@@ -32,6 +41,7 @@ const RADIUS_OPTIONS = [
 
 function App() {
   const [initialGroups] = useState(() => loadCustomGroups(getStorage()));
+  const [initialSelectedCategoryIds] = useState(() => loadSelectedCategoryIds(getStorage()));
   const [mode, setMode] = useState<DrawMode>('nearby');
   const [customPanelMode, setCustomPanelMode] = useState<CustomPanelMode>('draw');
   const [status, setStatus] = useState<Status>('idle');
@@ -39,11 +49,13 @@ function App() {
   const [shops, setShops] = useState<FoodShop[]>([]);
   const [nearbyMeta, setNearbyMeta] = useState<NearbyFoodResponse['meta']>();
   const [loadedRadiusMeters, setLoadedRadiusMeters] = useState<number | null>(null);
-  const [candidateShops, setCandidateShops] = useState<FoodShop[]>([]);
-  const [selectedShop, setSelectedShop] = useState<FoodShop | null>(null);
+  const [candidateShops, setCandidateShops] = useState<ClassifiedShop[]>([]);
+  const [selectedShop, setSelectedShop] = useState<ClassifiedShop | null>(null);
   const [message, setMessage] = useState('');
   const [drawPreview, setDrawPreview] = useState('今天吃什么');
+  const [drawShopNames, setDrawShopNames] = useState<string[]>([]);
   const [customGroups, setCustomGroups] = useState<CustomGroup[]>(initialGroups);
+  const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>(initialSelectedCategoryIds);
   const [selectedGroupId, setSelectedGroupId] = useState(initialGroups[0]?.id ?? '');
   const [newGroupName, setNewGroupName] = useState('');
   const [groupNameDraft, setGroupNameDraft] = useState('');
@@ -55,7 +67,7 @@ function App() {
   const drawTimerRefs = useRef<number[]>([]);
 
   const selectedGroup = customGroups.find((group) => group.id === selectedGroupId) ?? customGroups[0];
-  const isBusy = status === 'locating' || status === 'loading' || status === 'drawing';
+  const isBusy = status === 'locating' || status === 'loading' || status === 'drawing' || status === 'revealing';
   const radiusLabel = RADIUS_OPTIONS.find((option) => option.meters === radiusMeters)?.label ?? '1.5 公里';
   const filteredNearbyResult = useMemo(() => filterShopsByRegex(shops, nearbyFilter), [shops, nearbyFilter]);
   const filteredNearbyShops = filteredNearbyResult.shops;
@@ -194,7 +206,7 @@ function App() {
       return;
     }
 
-    const recommendation = chooseShop(normalized);
+    const recommendation = chooseWeightedShop(normalized, selectedCategoryIds);
 
     if (!recommendation) {
       setStatus('error');
@@ -208,6 +220,7 @@ function App() {
     setMessage('');
     setSelectedShop(null);
     setCandidateShops([]);
+    setDrawShopNames(normalized.map((shop) => shop.name).filter(Boolean));
     setDrawPreview(timeline[0]?.shop.name ?? recommendation.name);
     setStatus('drawing');
 
@@ -218,10 +231,20 @@ function App() {
         setDrawPreview(step.shop.name);
 
         if (step.isFinal || index === timeline.length - 1) {
-          clearDrawTimers();
-          setSelectedShop(recommendation);
-          setCandidateShops(getCandidateShops(normalized, recommendation, 6));
-          setStatus('ready');
+          setStatus('revealing');
+
+          const revealTimerId = window.setTimeout(() => {
+            clearDrawTimers();
+            setSelectedShop(recommendation);
+            setCandidateShops(
+              getCandidateShops(normalized, recommendation, 6).map((shop) =>
+                annotateShopCategory(shop, selectedCategoryIds)
+              )
+            );
+            setStatus('ready');
+          }, FINAL_REVEAL_DELAY_MS);
+
+          drawTimerRefs.current.push(revealTimerId);
         }
       }, elapsedTime);
 
@@ -273,6 +296,12 @@ function App() {
     setSelectedGroupId((currentGroupId) =>
       stableGroups.some((group) => group.id === currentGroupId) ? currentGroupId : stableGroups[0]?.id ?? ''
     );
+  }
+
+  function handleToggleCategory(categoryId: string) {
+    const nextSelectedCategoryIds = toggleSelectedCategoryId(selectedCategoryIds, categoryId);
+    setSelectedCategoryIds(nextSelectedCategoryIds);
+    saveSelectedCategoryIds(getStorage(), nextSelectedCategoryIds);
   }
 
   function showGroupFeedback(text: string, tone: FeedbackTone = 'info') {
@@ -402,6 +431,7 @@ function App() {
         </div>
 
         <RadiusSelector radiusMeters={radiusMeters} setRadiusMeters={changeRadius} />
+        <CategorySelector selectedCategoryIds={selectedCategoryIds} onToggleCategory={handleToggleCategory} />
 
         {mode === 'custom' ? (
           <CustomGroupEditor
@@ -458,27 +488,7 @@ function App() {
           <span>{mode === 'nearby' ? `默认 ${radiusLabel}` : `附近列表 ${shops.length} 家`}</span>
         </div>
 
-        {status === 'drawing' ? (
-          <div className="draw-ceremony">
-            <div className="draw-stage" aria-hidden="true">
-              <div className="shaker">
-                <Logo />
-                <span className="draw-stick stick-a" />
-                <span className="draw-stick stick-b" />
-                <span className="draw-stick stick-c" />
-              </div>
-              <div className="fortune-stick">
-                <span>今日签</span>
-              </div>
-            </div>
-            <p className="draw-kicker">签筒正在摇</p>
-            <strong className="draw-preview">{drawPreview}</strong>
-            <div className="draw-meter" aria-hidden="true">
-              <span />
-            </div>
-            <p className="draw-hint">候选正在收窄</p>
-          </div>
-        ) : selectedShop ? (
+        {selectedShop ? (
           <>
             <ShopResultCard shop={selectedShop} />
             {candidateShops.length > 0 ? (
@@ -487,8 +497,8 @@ function App() {
                 <div className="candidate-grid">
                   {candidateShops.map((shop) => (
                     <span key={shop.id}>
-                      {shop.name}
-                      {shop.distance ? <small>{shop.distance}m</small> : null}
+                      <strong>{shop.name}</strong>
+                      <small>{shop.category?.name ?? (shop.distance ? `${shop.distance}m` : '其他餐饮')}</small>
                     </span>
                   ))}
                 </div>
@@ -502,6 +512,9 @@ function App() {
           </div>
         )}
       </section>
+      {status === 'drawing' || status === 'revealing' ? (
+        <DrawOverlay drawPreview={drawPreview} shopNames={drawShopNames} isRevealing={status === 'revealing'} />
+      ) : null}
     </main>
   );
 }
@@ -530,6 +543,103 @@ function RadiusSelector({
       </div>
     </div>
   );
+}
+
+function CategorySelector({
+  selectedCategoryIds,
+  onToggleCategory
+}: {
+  selectedCategoryIds: string[];
+  onToggleCategory: (categoryId: string) => void;
+}) {
+  return (
+    <div className="category-selector">
+      <div className="category-selector-heading">
+        <p className="control-title">今天偏向</p>
+        <p className="preference-summary">选中的大类会提高抽中概率，不是过滤条件。</p>
+      </div>
+      <div className="category-chip-row" aria-label="今天偏向">
+        {FOOD_CATEGORIES.map((category) => {
+          const isSelected = selectedCategoryIds.includes(category.id);
+
+          return (
+            <button
+              key={category.id}
+              type="button"
+              className={isSelected ? 'selected' : ''}
+              aria-pressed={isSelected}
+              onClick={() => onToggleCategory(category.id)}
+            >
+              <span>{category.name}</span>
+              {isSelected ? <small>加权</small> : null}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DrawOverlay({
+  drawPreview,
+  shopNames,
+  isRevealing
+}: {
+  drawPreview: string;
+  shopNames: string[];
+  isRevealing: boolean;
+}) {
+  const rollingShopNames = createRollingShopNames(shopNames, drawPreview);
+
+  return (
+    <div className={`draw-overlay ${isRevealing ? 'revealing' : ''}`} role="status" aria-live="polite">
+      <div className="draw-overlay-panel">
+        <p className="draw-kicker">{isRevealing ? '抽中了，就是它' : '餐厅池正在滚动'}</p>
+        <div className="lottery-stage">
+          <div className="restaurant-slot-window">
+            <div className="restaurant-stream" role="list" aria-label="滚动餐厅列表">
+              {rollingShopNames.map((name, index) => (
+                <span key={`${name}-${index}`} role="listitem">
+                  {name}
+                </span>
+              ))}
+            </div>
+            <span className="slot-fade slot-fade-top" aria-hidden="true" />
+            <span className="slot-fade slot-fade-bottom" aria-hidden="true" />
+            <div className="lottery-frame">
+              <span className="frame-label">{isRevealing ? '中奖锁定' : '抽奖框乱抽中'}</span>
+              <strong className="draw-preview">{drawPreview}</strong>
+            </div>
+          </div>
+          <div className="draw-sparks" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
+        </div>
+        <div className="near-miss-track" aria-hidden="true">
+          <span>快中了</span>
+          <span>擦肩而过</span>
+          <span>最后一签</span>
+        </div>
+        <div className="draw-meter" aria-hidden="true">
+          <span />
+        </div>
+        <p className="draw-hint">
+          <span>候选正在收窄</span>
+          <span>差一点就定格，又被签筒摇走了</span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function createRollingShopNames(shopNames: string[], drawPreview: string): string[] {
+  const uniqueNames = Array.from(new Set(shopNames.filter((name) => name.trim())));
+  const sourceNames = uniqueNames.length > 0 ? uniqueNames : [drawPreview];
+
+  return Array.from({ length: 4 }, () => sourceNames).flat();
 }
 
 type CustomGroupEditorProps = {
@@ -761,7 +871,7 @@ function SavedShopItem({
   );
 }
 
-function ShopResultCard({ shop }: { shop: FoodShop }) {
+function ShopResultCard({ shop }: { shop: ClassifiedShop }) {
   const navigationHref = getAmapNavigationHref(shop);
 
   return (
@@ -770,6 +880,11 @@ function ShopResultCard({ shop }: { shop: FoodShop }) {
         <span className="tag">今日推荐</span>
         {shop.distance ? <span>{shop.distance}m</span> : null}
       </div>
+      {shop.category ? (
+        <span className="category-tag">
+          {shop.category.name} · {shop.category.weighted ? '已加权' : '普通'}
+        </span>
+      ) : null}
       <h2>{shop.name}</h2>
       {shop.address ? (
         <p className="address">

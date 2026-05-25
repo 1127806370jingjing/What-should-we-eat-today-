@@ -14,6 +14,21 @@ export type SavedShop = FoodShop & {
   savedAt: string;
 };
 
+export type FoodCategory = {
+  id: string;
+  name: string;
+  keywords: string[];
+};
+
+export type ClassifiedShop = FoodShop & {
+  category?: {
+    id: string;
+    name: string;
+    weighted: boolean;
+    weight: number;
+  };
+};
+
 export type NearbyFoodRequest = {
   lat: number;
   lng: number;

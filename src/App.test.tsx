@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
 const STORAGE_KEY = 'what-to-eat:custom-groups:v1';
-const DRAW_WAIT_OPTIONS = { timeout: 3500 };
+const SELECTED_CATEGORIES_STORAGE_KEY = 'what-to-eat:selected-categories:v1';
+const DRAW_WAIT_OPTIONS = { timeout: 7000 };
+
+vi.setConfig({ testTimeout: 12000 });
 
 function mockGeolocationSuccess() {
   const getCurrentPosition = vi.fn((success: PositionCallback) => {
@@ -82,6 +85,79 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: '再摇一次' })).toBeEnabled();
   });
 
+  it('shows selectable category chips and persists the chosen weighted categories', async () => {
+    render(<App />);
+
+    expect(screen.getByText('今天偏向')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /便当套餐/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /米粉汤面/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /汉堡披萨/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '奶茶咖啡' })).toHaveAttribute('aria-pressed', 'false');
+
+    await userEvent.click(screen.getByRole('button', { name: '奶茶咖啡' }));
+
+    expect(screen.getByRole('button', { name: /奶茶咖啡/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(JSON.parse(localStorage.getItem(SELECTED_CATEGORIES_STORAGE_KEY) ?? '[]')).toEqual([
+      'bento-set',
+      'rice-noodle-soup',
+      'burger-pizza',
+      'milk-tea-coffee'
+    ]);
+  });
+
+  it('uses selected categories for weighted drawing and shows the immersive overlay', async () => {
+    mockGeolocationSuccess();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      Response.json({
+        shops: [
+          { id: 'coffee', name: '拿铁咖啡', distance: 90, address: '饮品街' },
+          { id: 'noodle', name: '兰州牛肉面', distance: 120, address: '青年路' }
+        ]
+      })
+    );
+    vi.spyOn(Math, 'random').mockReturnValue(0.4);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: '今天吃什么' }));
+
+    expect(screen.getByRole('list', { name: '滚动餐厅列表' })).toBeInTheDocument();
+    expect(screen.getAllByText('拿铁咖啡').length).toBeGreaterThan(1);
+    expect(screen.getByRole('status')).toHaveTextContent('快中了');
+    expect(screen.getByRole('status')).toHaveTextContent('擦肩而过');
+    expect(screen.getByRole('status')).toHaveTextContent('差一点就定格');
+    expect(screen.getByRole('button', { name: '正在摇签' })).toBeDisabled();
+
+    expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
+    expect(screen.getByText('兰州牛肉面')).toBeInTheDocument();
+    expect(screen.getByText('米粉汤面 · 已加权')).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('keeps the final result on the draw overlay before transitioning into the recommendation card', async () => {
+    mockGeolocationSuccess();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      Response.json({
+        shops: [
+          { id: 'noodle', name: '兰州牛肉面', distance: 120, address: '青年路' },
+          { id: 'rice', name: '烤肉饭', distance: 180, address: '银杏路' }
+        ]
+      })
+    );
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: '今天吃什么' }));
+
+    expect(await screen.findByText('抽中了，就是它', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
+    expect(screen.getByText('中奖锁定')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('兰州牛肉面');
+    expect(screen.queryByText('今日推荐')).not.toBeInTheDocument();
+
+    expect(await screen.findByText('今日推荐', undefined, { timeout: 2200 })).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByText('兰州牛肉面')).toBeInTheDocument();
+  }, 9000);
+
   it('rerolls nearby food from the current pool without fetching again', async () => {
     mockGeolocationSuccess();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
@@ -106,7 +182,7 @@ describe('App', () => {
     expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
     expect(screen.getByText('煲仔饭')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '今天吃什么' })).not.toBeInTheDocument();
-  }, 10000);
+  }, 16000);
 
   it('resets the nearby action to fetch again after the radius changes', async () => {
     mockGeolocationSuccess();
@@ -138,7 +214,7 @@ describe('App', () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(JSON.parse(fetchSpy.mock.calls[1][1]?.body as string)).toMatchObject({ radius: 3000 });
-  }, 10000);
+  }, 16000);
 
   it('uses the selected radius preset when fetching nearby food', async () => {
     mockGeolocationSuccess();
@@ -260,7 +336,8 @@ describe('App', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '抽一个' }));
 
-    expect(screen.getByText('签筒正在摇')).toBeInTheDocument();
+    expect(screen.getByText('餐厅池正在滚动')).toBeInTheDocument();
+    expect(screen.getByRole('list', { name: '滚动餐厅列表' })).toBeInTheDocument();
     expect(screen.getByText('候选正在收窄')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '正在摇签' })).toBeDisabled();
     expect(await screen.findByText('今日推荐', undefined, DRAW_WAIT_OPTIONS)).toBeInTheDocument();
