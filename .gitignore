@@ -10,3 +10,6 @@ vite.log
 vite.err.log
 wrangler-pages*.log
 verification-*.png
+
+.env*
+!.env.example
